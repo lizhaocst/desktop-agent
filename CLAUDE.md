@@ -28,6 +28,7 @@
 
 ## 开始开发前检查清单
 - 阅读本文件后再开始任何操作。
+- 阅读全局规划文档：`/home/lizhao/projects/plan.md`。
 - 运行 `git branch --show-current`，确认是 `main`。
 - 运行 `git worktree list`，确认 5 个工作区映射正常。
 - 运行 `git status --short`，确认无意外脏改动。
