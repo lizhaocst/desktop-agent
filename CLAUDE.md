@@ -25,6 +25,7 @@
 
 ## 开始开发前检查清单
 - 阅读本文件后再动代码。
+- 阅读全局规划文档：`/home/lizhao/projects/plan.md`。
 - 运行 `git branch --show-current`，确认是 `dev/test`。
 - 运行 `git status --short`，确认工作区干净。
 - 确认当前契约版本与测试目标一致。
