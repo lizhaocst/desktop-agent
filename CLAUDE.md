@@ -17,6 +17,7 @@
 ## 输入契约（依赖谁的产出）
 - frontend/backend 的功能提交与接口说明
 - qa 的门禁规则与覆盖要求
+- 前后端统一模块交接单（模块ID、FE_SHA、BE_SHA、Scope、AC、TestCmd）
 
 ## 输出契约（要交付什么）
 - 可复现的测试用例与报告
@@ -34,6 +35,57 @@
 - 仅在测试路径编写代码，避免修改业务实现。
 - 测试命名必须体现行为与预期。
 - 对 flaky 测试标记原因，禁止静默跳过失败。
+- 未收到完整交接单时，不执行模块验收测试。
+
+## 模块验收入口（必须）
+- 测试端只接收以下格式的交接单，字段不全直接退回 frontend/backend：
+
+```text
+[M-xxx] ready
+FE_SHA: <frontend_commit_sha>
+BE_SHA: <backend_commit_sha>
+Scope: <本模块改动范围/涉及文件/接口>
+AC: <验收标准1>; <验收标准2>
+TestCmd: npm run typecheck && npm run test
+```
+
+## 模块验收流程（必须）
+- 基于交接单中的 SHA 执行，禁止“目测最新分支”替代。
+
+```bash
+MODULE_ID=M-xxx
+FE_SHA=<frontend_commit_sha>
+BE_SHA=<backend_commit_sha>
+VERIFY_BRANCH="verify/${MODULE_ID}-$(date +%Y%m%d-%H%M%S)"
+
+git fetch origin
+git switch -c "$VERIFY_BRANCH" dev/test
+git merge --no-edit "$FE_SHA"
+git merge --no-edit "$BE_SHA"
+npm run typecheck
+npm run test
+```
+
+## 验收结果输出模板（必须）
+- 通过：
+
+```text
+[M-xxx] PASS
+FE_SHA: <frontend_commit_sha>
+BE_SHA: <backend_commit_sha>
+Result: allow commit and next module
+```
+
+- 失败：
+
+```text
+[M-xxx] FAIL
+FE_SHA: <frontend_commit_sha>
+BE_SHA: <backend_commit_sha>
+Severity: blocking/non-blocking
+Owner: frontend/backend/contract
+Repro: <最小复现步骤>
+```
 
 ## 提交前检查清单
 - 运行 `npm run typecheck`。
