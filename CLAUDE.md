@@ -35,10 +35,13 @@
 - 禁止修改 `src/renderer/**`。
 - IPC 变更必须先更新 `src/preload/index.d.ts`，再更新 handler 实现。
 - Shell/File 等工具必须具备错误处理与超时策略。
+- 模块化开发强制规则：每完成一个模块（如一个 IPC handler/一个 tool/一个数据访问单元），先执行最小验证（至少 `npm run typecheck:node`；若已有测试则执行对应测试），通过后才能开始下一个模块。
+- 若当前模块测试失败，必须先修复并复测通过，禁止并行推进下一个未验证模块。
 
 ## 提交前检查清单
 - 运行 `npm run typecheck:node`。
 - 运行 `npm run lint`（若依赖可用）。
+- 若本次改动涉及已存在测试模块，运行对应测试并记录结果。
 - 自查返回结构是否与契约一致，避免隐式 breaking change。
 
 ## 与其他分支冲突时的处理流程
