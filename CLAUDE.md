@@ -23,7 +23,8 @@
 - 可调用的 IPC handler
 - 稳定的工具入参与返回结构
 - 明确错误对象与可观测日志信息
-- 模块交接信息（用于测试端验收）
+- 模块交接信息（用于测试端单模块验收）
+- 全量集成交接信息（用于最终统一验收）
 
 ## 开始开发前检查清单
 - 阅读本文件后再动代码。
@@ -38,18 +39,31 @@
 - Shell/File 等工具必须具备错误处理与超时策略。
 - 模块化开发强制规则：每完成一个模块（如一个 IPC handler/一个 tool/一个数据访问单元），先执行最小验证（至少 `npm run typecheck:node`；若已有测试则执行对应测试），通过后才能开始下一个模块。
 - 若当前模块测试失败，必须先修复并复测通过，禁止并行推进下一个未验证模块。
-- 测试交接规则：模块测试通过后，必须与 frontend 对齐，向 `dev/test` 提供统一交接单（模块ID + FE/BE SHA + 验收清单）。
+- 测试交接规则（单模块阶段）：每完成一个后端模块并自测通过，必须立即向 `dev/test` 提供单模块交接单并触发单边验证。
+- 统一验证规则（最终阶段）：仅当前后端所有模块都完成后，才向 `dev/test` 提交“全量集成交接单”进行统一验证。
 
-## 模块交接单（发送给测试端）
-- 发送时机：当前模块已完成且后端最小验证通过后。
-- 必填字段缺失时，不得进入测试端验证。
+## 单模块交接单（发送给测试端）
+- 发送时机：当前后端模块已完成且后端最小验证通过后。
+- 必填字段缺失时，测试端必须退回。
 
 ```text
 [M-xxx] ready
-FE_SHA: <frontend_commit_sha>
-BE_SHA: <backend_commit_sha>
+Owner: backend
+SHA: <backend_commit_sha>
 Scope: <本模块改动范围/涉及文件/接口>
 AC: <验收标准1>; <验收标准2>
+TestCmd: npm run typecheck && npm run test:unit
+```
+
+## 全量集成交接单（最终统一验证）
+- 发送时机：frontend 与 backend 均确认“本轮全部模块完成”后。
+
+```text
+[R-xxx] integration-ready
+FE_BASE_SHA: <frontend_commit_sha>
+BE_BASE_SHA: <backend_commit_sha>
+ModuleList: M-001,M-002,...
+AC: <集成验收标准1>; <集成验收标准2>
 TestCmd: npm run typecheck && npm run test
 ```
 
@@ -57,7 +71,7 @@ TestCmd: npm run typecheck && npm run test
 - 运行 `npm run typecheck:node`。
 - 运行 `npm run lint`（若依赖可用）。
 - 若本次改动涉及已存在测试模块，运行对应测试并记录结果。
-- 已生成并发送模块交接单给测试端（或明确标记为未进入测试阶段）。
+- 当前模块已生成并发送“单模块交接单”给测试端（或明确标记未完成模块）。
 - 自查返回结构是否与契约一致，避免隐式 breaking change。
 
 ## 与其他分支冲突时的处理流程
