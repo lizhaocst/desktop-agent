@@ -25,6 +25,7 @@
 
 ## 开始开发前检查清单
 - 阅读本文件后再动代码。
+- 阅读全局规划文档：`/home/lizhao/projects/plan.md`。
 - 运行 `git branch --show-current`，确认是 `dev/frontend`。
 - 运行 `git status --short`，确认工作区干净。
 - 拉取最新基线并确认契约文件版本。
