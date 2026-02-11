@@ -1,5 +1,7 @@
 # desktop-agent
 
+仿照 ccwork 的 Electron 桌面 Agent 应用。
+
 An Electron application with React and TypeScript
 
 ## Recommended IDE Setup
