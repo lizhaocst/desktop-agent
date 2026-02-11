@@ -1,8 +1,43 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
-// Custom APIs for renderer
-const api = {}
+type ChatStartRequest = {
+  sessionId: string
+  message: string
+}
+
+type ChatStartResponse = {
+  streamId: string
+}
+
+type ChatStreamEvent =
+  | { streamId: string; type: 'start' }
+  | { streamId: string; type: 'delta'; text: string }
+  | { streamId: string; type: 'done' }
+  | { streamId: string; type: 'error'; message: string }
+
+type PreloadApi = {
+  chat: {
+    start: (request: ChatStartRequest) => Promise<ChatStartResponse>
+    onStream: (listener: (event: ChatStreamEvent) => void) => () => void
+  }
+}
+
+const api: PreloadApi = {
+  chat: {
+    start: (request) => ipcRenderer.invoke('chat:start', request),
+    onStream: (listener) => {
+      const streamListener = (_event: Electron.IpcRendererEvent, payload: ChatStreamEvent): void => {
+        listener(payload)
+      }
+
+      ipcRenderer.on('chat:stream', streamListener)
+      return () => {
+        ipcRenderer.removeListener('chat:stream', streamListener)
+      }
+    }
+  }
+}
 
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise
