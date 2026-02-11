@@ -4,6 +4,28 @@
 - 你在 `dev/frontend` 分支工作区，职责是 Renderer UI、交互逻辑、状态管理与前端调用层。
 - 目标是交付可用前端界面，并严格遵守前后端边界。
 
+## 本轮目标（R-P1-Loop）
+- 本轮总目标：仅实现最小闭环 `输入 -> 模型 -> 流式返回 -> 渲染`，不做 Tool Calling/SQLite/多会话。
+- frontend 本轮职责：
+  - F1: 聊天基础 UI（消息列表 + 输入框 + 发送按钮 + loading 状态）
+  - F2: 流式渲染状态管理（start/delta/done/error）
+  - F3: IPC 调用层接入（调用 `chat:start` + 订阅 `chat:stream`）
+  - F4: 错误展示与最小重试入口
+
+统一验收标准（AC）：
+1. 用户发送消息后，主进程调用模型并持续返回增量文本。
+2. 前端消息可实时渲染增量内容。
+3. 正常完成时状态从 `streaming` 切换为 `done`。
+4. 异常时展示错误信息且不崩溃，可手动重试。
+
+统一 IPC 契约（本轮冻结）：
+- invoke: `chat:start`，入参 `{ sessionId: string, message: string }`，返回 `{ streamId: string }`
+- event: `chat:stream`，载荷：
+  - `{ streamId, type: 'start' }`
+  - `{ streamId, type: 'delta', text }`
+  - `{ streamId, type: 'done' }`
+  - `{ streamId, type: 'error', message }`
+
 ## 允许修改的路径（ALLOW）
 - `src/renderer/**`
 - `src/preload/index.d.ts`（仅类型契约声明）
