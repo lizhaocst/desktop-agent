@@ -42,7 +42,7 @@ export const startChatStream = async (payload: ChatStartRequest): Promise<ChatSt
 }
 
 export const subscribeChatStream = (onEvent: (event: ChatStreamEvent) => void): (() => void) => {
-  return window.electron.ipcRenderer.on('chat:stream', (payload) => {
+  return window.electron.ipcRenderer.on('chat:stream', (_event, payload: unknown) => {
     if (isChatStreamEvent(payload)) {
       onEvent(payload)
     }
