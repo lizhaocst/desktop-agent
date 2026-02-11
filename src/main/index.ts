@@ -1,6 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { join } from 'path'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
@@ -21,6 +22,7 @@ type ChatStreamEvent =
 
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_STREAM_CHANNEL = 'chat:stream'
+const LOCAL_ENV_FILE = '.env.local'
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -29,6 +31,69 @@ function getErrorMessage(error: unknown): string {
 
   return 'Unexpected error'
 }
+
+function parseEnvLine(line: string): [string, string] | null {
+  const trimmedLine = line.trim()
+  if (!trimmedLine || trimmedLine.startsWith('#')) {
+    return null
+  }
+
+  const normalizedLine = trimmedLine.startsWith('export ') ? trimmedLine.slice(7).trim() : trimmedLine
+  const separatorIndex = normalizedLine.indexOf('=')
+  if (separatorIndex <= 0) {
+    return null
+  }
+
+  const key = normalizedLine.slice(0, separatorIndex).trim()
+  if (!key) {
+    return null
+  }
+
+  let value = normalizedLine.slice(separatorIndex + 1).trim()
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1)
+  }
+
+  return [key, value]
+}
+
+function loadLocalEnvForDev(): void {
+  if (!is.dev) {
+    return
+  }
+
+  const envPath = resolve(process.cwd(), LOCAL_ENV_FILE)
+  if (!existsSync(envPath)) {
+    console.info('[env] .env.local not found, skip loading', { path: envPath })
+    return
+  }
+
+  try {
+    const content = readFileSync(envPath, 'utf8')
+    const lines = content.split(/\r?\n/)
+
+    for (const line of lines) {
+      const parsedEntry = parseEnvLine(line)
+      if (!parsedEntry) {
+        continue
+      }
+
+      const [key, value] = parsedEntry
+      if (process.env[key] === undefined) {
+        process.env[key] = value
+      }
+    }
+
+    console.info('[env] .env.local loaded', { path: envPath })
+  } catch (error) {
+    console.warn('[env] failed to load .env.local', { path: envPath, message: getErrorMessage(error) })
+  }
+}
+
+loadLocalEnvForDev()
 
 function sendChatStream(webContents: Electron.WebContents, payload: ChatStreamEvent): void {
   if (webContents.isDestroyed()) {
