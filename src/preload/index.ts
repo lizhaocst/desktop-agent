@@ -27,7 +27,10 @@ const api: PreloadApi = {
   chat: {
     start: (request) => ipcRenderer.invoke('chat:start', request),
     onStream: (listener) => {
-      const streamListener = (_event: Electron.IpcRendererEvent, payload: ChatStreamEvent): void => {
+      const streamListener = (
+        _event: Electron.IpcRendererEvent,
+        payload: ChatStreamEvent
+      ): void => {
         listener(payload)
       }
 
