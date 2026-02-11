@@ -4,6 +4,26 @@
 - 你在 `dev/test` 分支工作区，职责是单元测试、集成测试、E2E 测试与回归验证。
 - 目标是用可复现测试保障前后端变更质量。
 
+## 本轮目标（R-P1-Loop）
+- 本轮总目标：仅实现最小闭环 `输入 -> 模型 -> 流式返回 -> 渲染`，不做 Tool Calling/SQLite/多会话。
+- test 本轮职责：
+  - 每个单模块完成后立即执行单边验证（Owner + SHA）。
+  - 仅当前后端全部模块完成后执行一次统一集成验证（FE_BASE_SHA + BE_BASE_SHA）。
+
+统一验收标准（AC）：
+1. 用户发送消息后，主进程调用模型并持续返回增量文本。
+2. 前端消息可实时渲染增量内容。
+3. 正常完成时状态从 `streaming` 切换为 `done`。
+4. 异常时展示错误信息且不崩溃，可手动重试。
+
+统一 IPC 契约（本轮冻结）：
+- invoke: `chat:start`，入参 `{ sessionId: string, message: string }`，返回 `{ streamId: string }`
+- event: `chat:stream`，载荷：
+  - `{ streamId, type: 'start' }`
+  - `{ streamId, type: 'delta', text }`
+  - `{ streamId, type: 'done' }`
+  - `{ streamId, type: 'error', message }`
+
 ## 允许修改的路径（ALLOW）
 - `tests/**`
 - `vitest.config.ts`、`playwright.config.ts`（若存在）
