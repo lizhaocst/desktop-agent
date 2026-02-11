@@ -100,7 +100,10 @@ const markStreamMessage = (
       ...message,
       status,
       errorMessage: errorMessage ?? message.errorMessage,
-      text: status === 'error' && message.text.length === 0 ? (errorMessage ?? 'Request failed') : message.text
+      text:
+        status === 'error' && message.text.length === 0
+          ? (errorMessage ?? 'Request failed')
+          : message.text
     }
   })
 
@@ -214,7 +217,10 @@ function App(): React.JSX.Element {
   }, [])
 
   const isBusy =
-    state.isStarting || state.pendingStreamId !== null || state.activeStreamId !== null || state.streamStatus === 'streaming'
+    state.isStarting ||
+    state.pendingStreamId !== null ||
+    state.activeStreamId !== null ||
+    state.streamStatus === 'streaming'
   const canSend = inputText.trim().length > 0 && !isBusy
 
   const sendMessage = async (message: string): Promise<void> => {
