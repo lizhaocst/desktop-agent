@@ -1,4 +1,10 @@
-import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useReducer, useState } from 'react'
+import {
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useReducer,
+  useState
+} from 'react'
 import { startChatStream, subscribeChatStream } from '@renderer/lib/chatIpc'
 import type { ChatStreamEvent } from '@renderer/types/chat'
 
@@ -82,7 +88,11 @@ const ensureStreamingMessage = (messages: ChatMessage[], streamId: string): Chat
   })
 }
 
-const appendDeltaToStream = (messages: ChatMessage[], streamId: string, text: string): ChatMessage[] => {
+const appendDeltaToStream = (
+  messages: ChatMessage[],
+  streamId: string,
+  text: string
+): ChatMessage[] => {
   const existingIndex = messages.findIndex((message) => message.streamId === streamId)
   if (existingIndex < 0) {
     return [
@@ -140,7 +150,11 @@ const markDoneForStream = (messages: ChatMessage[], streamId: string): ChatMessa
   })
 }
 
-const markErrorForStream = (messages: ChatMessage[], streamId: string, errorMessage: string): ChatMessage[] => {
+const markErrorForStream = (
+  messages: ChatMessage[],
+  streamId: string,
+  errorMessage: string
+): ChatMessage[] => {
   const existingIndex = messages.findIndex((message) => message.streamId === streamId)
   if (existingIndex < 0) {
     return [
@@ -236,7 +250,11 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       return state
     }
 
-    if (action.streamId !== null && expectedStreamId !== null && action.streamId !== expectedStreamId) {
+    if (
+      action.streamId !== null &&
+      expectedStreamId !== null &&
+      action.streamId !== expectedStreamId
+    ) {
       return state
     }
 
@@ -356,7 +374,8 @@ function App(): React.JSX.Element {
     }
   }, [state.isStarting, inFlightStreamId, state.streamUpdatedAt])
 
-  const hasInFlight = state.isStarting || state.pendingStreamId !== null || state.activeStreamId !== null
+  const hasInFlight =
+    state.isStarting || state.pendingStreamId !== null || state.activeStreamId !== null
   const canSend = inputText.trim().length > 0 && !hasInFlight && !isComposing
 
   const sendMessage = async (rawMessage: string): Promise<void> => {
