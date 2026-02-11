@@ -1,7 +1,107 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+
+type ChatStartRequest = {
+  sessionId: string
+  message: string
+}
+
+type ChatStartResponse = {
+  streamId: string
+}
+
+type ChatStreamEvent =
+  | { streamId: string; type: 'start' }
+  | { streamId: string; type: 'delta'; text: string }
+  | { streamId: string; type: 'done' }
+  | { streamId: string; type: 'error'; message: string }
+
+const CHAT_START_CHANNEL = 'chat:start'
+const CHAT_STREAM_CHANNEL = 'chat:stream'
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  return 'Unexpected error'
+}
+
+function sendChatStream(webContents: Electron.WebContents, payload: ChatStreamEvent): void {
+  if (webContents.isDestroyed()) {
+    console.warn('[chat:stream] target webContents is destroyed, skip event', payload.type)
+    return
+  }
+
+  webContents.send(CHAT_STREAM_CHANNEL, payload)
+}
+
+async function streamModelDelta(message: string, onDelta: (text: string) => void): Promise<void> {
+  const apiKey = process.env['OPENAI_API_KEY']
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is not set')
+  }
+
+  const baseUrl = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
+  const model = process.env['OPENAI_MODEL'] ?? 'gpt-4.1-mini'
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model,
+      stream: true,
+      messages: [{ role: 'user', content: message }]
+    })
+  })
+
+  if (!response.ok || !response.body) {
+    const details = await response.text().catch(() => '')
+    throw new Error(`Model request failed (${response.status}): ${details}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim()
+      if (!line.startsWith('data:')) {
+        continue
+      }
+
+      const rawData = line.slice(5).trim()
+      if (rawData === '[DONE]') {
+        return
+      }
+
+      try {
+        const payload = JSON.parse(rawData)
+        const text = payload?.choices?.[0]?.delta?.content
+        if (typeof text === 'string' && text.length > 0) {
+          onDelta(text)
+        }
+      } catch {
+        // Ignore malformed chunks and continue streaming.
+      }
+    }
+  }
+}
 
 function createWindow(): void {
   // Create the browser window.
@@ -49,8 +149,27 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
+  ipcMain.handle(CHAT_START_CHANNEL, (event, request: ChatStartRequest): ChatStartResponse => {
+    const streamId = randomUUID()
+    console.info('[chat:start] stream created', { streamId, sessionId: request.sessionId })
+
+    void (async () => {
+      try {
+        sendChatStream(event.sender, { streamId, type: 'start' })
+        await streamModelDelta(request.message, (text) => {
+          sendChatStream(event.sender, { streamId, type: 'delta', text })
+        })
+        sendChatStream(event.sender, { streamId, type: 'done' })
+        console.info('[chat:done] stream completed', { streamId })
+      } catch (error) {
+        const message = getErrorMessage(error)
+        sendChatStream(event.sender, { streamId, type: 'error', message })
+        console.error('[chat:error] stream failed', { streamId, message })
+      }
+    })()
+
+    return { streamId }
+  })
 
   createWindow()
 
