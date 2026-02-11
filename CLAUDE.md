@@ -4,6 +4,28 @@
 - 你在 `dev/backend` 分支工作区，职责是 Electron 主进程、Agent 引擎、工具层、IPC handler 与数据层。
 - 目标是保证工具执行可靠、IPC 接口稳定、错误可追踪。
 
+## 本轮目标（R-P1-Loop）
+- 本轮总目标：仅实现最小闭环 `输入 -> 模型 -> 流式返回 -> 渲染`，不做 Tool Calling/SQLite/多会话。
+- backend 本轮职责：
+  - B1: 定义并落地 IPC 契约类型（`src/preload/index.d.ts`）
+  - B2: preload 桥接实现（`src/preload/index.ts`）：暴露 `chat.start` 与 `chat.onStream`
+  - B3: main 进程 handler（`chat:start`）：调用模型流式接口并分发 `chat:stream` 事件
+  - B4: 结束与错误处理（done/error 事件、基础日志）
+
+统一验收标准（AC）：
+1. 用户发送消息后，主进程调用模型并持续返回增量文本。
+2. 前端消息可实时渲染增量内容。
+3. 正常完成时状态从 `streaming` 切换为 `done`。
+4. 异常时展示错误信息且不崩溃，可手动重试。
+
+统一 IPC 契约（本轮冻结）：
+- invoke: `chat:start`，入参 `{ sessionId: string, message: string }`，返回 `{ streamId: string }`
+- event: `chat:stream`，载荷：
+  - `{ streamId, type: 'start' }`
+  - `{ streamId, type: 'delta', text }`
+  - `{ streamId, type: 'done' }`
+  - `{ streamId, type: 'error', message }`
+
 ## 允许修改的路径（ALLOW）
 - `src/main/**`
 - `src/preload/index.ts`（桥接实现）
