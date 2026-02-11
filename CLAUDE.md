@@ -4,6 +4,24 @@
 - 你在 `main` 分支工作区，职责是集成、基线维护、发布准备。
 - 目标是保持主线稳定，不在此分支直接开发业务功能。
 
+## 本轮目标（R-P1-Loop）
+- 本轮总目标：仅实现最小闭环 `输入 -> 模型 -> 流式返回 -> 渲染`，不做 Tool Calling/SQLite/多会话。
+- main 本轮职责：只负责集成、冲突协调与基线冻结，不直接开发功能。
+
+统一验收标准（AC）：
+1. 用户发送消息后，主进程调用模型并持续返回增量文本。
+2. 前端消息可实时渲染增量内容。
+3. 正常完成时状态从 `streaming` 切换为 `done`。
+4. 异常时展示错误信息且不崩溃，可手动重试。
+
+统一 IPC 契约（本轮冻结）：
+- invoke: `chat:start`，入参 `{ sessionId: string, message: string }`，返回 `{ streamId: string }`
+- event: `chat:stream`，载荷：
+  - `{ streamId, type: 'start' }`
+  - `{ streamId, type: 'delta', text }`
+  - `{ streamId, type: 'done' }`
+  - `{ streamId, type: 'error', message }`
+
 ## 允许修改的路径（ALLOW）
 - `README.md`
 - `plan.md`（上级目录规划文档引用更新时）
