@@ -1,6 +1,9 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, dialog, ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { join } from 'path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { createOpenAI } from '@ai-sdk/openai'
+import { stepCountIs, streamText, tool } from 'ai'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
@@ -17,10 +20,31 @@ type ChatStreamEvent =
   | { streamId: string; type: 'start' }
   | { streamId: string; type: 'delta'; text: string }
   | { streamId: string; type: 'done' }
+  | { streamId: string; type: 'tool_call_start'; toolName: string; callId: string }
+  | {
+      streamId: string
+      type: 'tool_call_result'
+      toolName: string
+      callId: string
+      ok: boolean
+      output?: unknown
+      error?: string
+    }
   | { streamId: string; type: 'error'; message: string }
 
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_STREAM_CHANNEL = 'chat:stream'
+const FILE_TOOL_READ_NAME = 'read_file'
+const FILE_TOOL_WRITE_NAME = 'write_file'
+const FILE_TOOL_MAX_STEPS = 5
+const MODEL_SYSTEM_PROMPT = [
+  'You are a desktop coding assistant.',
+  `When reading files, use ${FILE_TOOL_READ_NAME}.`,
+  `When writing files, use ${FILE_TOOL_WRITE_NAME}.`,
+  'Never claim file access unless a tool call succeeds.'
+].join(' ')
+
+const authorizedDirectoryByWebContentsId = new Map<number, string>()
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -39,66 +63,203 @@ function sendChatStream(webContents: Electron.WebContents, payload: ChatStreamEv
   webContents.send(CHAT_STREAM_CHANNEL, payload)
 }
 
-async function streamModelDelta(message: string, onDelta: (text: string) => void): Promise<void> {
+async function getOrRequestAuthorizedDirectory(
+  sender: Electron.WebContents,
+  streamId: string
+): Promise<string> {
+  const cachedDirectory = authorizedDirectoryByWebContentsId.get(sender.id)
+  if (cachedDirectory) {
+    return cachedDirectory
+  }
+
+  const window = BrowserWindow.fromWebContents(sender)
+  if (!window) {
+    throw new Error('Cannot resolve browser window for file tool authorization')
+  }
+
+  const result = await dialog.showOpenDialog(window, {
+    title: 'Select authorized folder for file tools',
+    properties: ['openDirectory', 'createDirectory']
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    throw new Error('File tool authorization was canceled by user')
+  }
+
+  const authorizedDirectory = resolve(result.filePaths[0])
+  authorizedDirectoryByWebContentsId.set(sender.id, authorizedDirectory)
+  sender.once('destroyed', () => {
+    authorizedDirectoryByWebContentsId.delete(sender.id)
+  })
+
+  console.info('[tool:auth] directory authorized', { streamId, webContentsId: sender.id, authorizedDirectory })
+  return authorizedDirectory
+}
+
+function resolvePathWithinAuthorizedDirectory(authorizedDirectory: string, inputPath: string): string {
+  if (inputPath.trim().length === 0) {
+    throw new Error('File path is required')
+  }
+
+  const resolvedPath = isAbsolute(inputPath)
+    ? resolve(inputPath)
+    : resolve(authorizedDirectory, inputPath)
+  const relativePath = relative(authorizedDirectory, resolvedPath)
+  const isOutOfAuthorizedDirectory =
+    relativePath.length > 0 && (relativePath.startsWith('..') || isAbsolute(relativePath))
+
+  if (isOutOfAuthorizedDirectory) {
+    throw new Error('File path is outside the authorized directory')
+  }
+
+  return resolvedPath
+}
+
+function createFileTools(sender: Electron.WebContents, streamId: string) {
+  return {
+    [FILE_TOOL_READ_NAME]: tool({
+      description: 'Read UTF-8 text from a file inside the authorized directory',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path, relative to authorized directory.' }
+        },
+        required: ['path'],
+        additionalProperties: false
+      },
+      execute: async (input: { path: string }, options?: { toolCallId?: string }) => {
+        try {
+          const authorizedDirectory = await getOrRequestAuthorizedDirectory(sender, streamId)
+          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, input.path)
+          const content = await readFile(filePath, 'utf8')
+          return {
+            path: relative(authorizedDirectory, filePath),
+            content
+          }
+        } catch (error) {
+          console.error('[tool:read_file] failed', {
+            streamId,
+            callId: options?.toolCallId ?? 'unknown_call',
+            path: input.path,
+            message: getErrorMessage(error)
+          })
+          throw error
+        }
+      }
+    }),
+    [FILE_TOOL_WRITE_NAME]: tool({
+      description: 'Write UTF-8 text to a file inside the authorized directory',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Target file path, relative to authorized directory.' },
+          content: { type: 'string', description: 'UTF-8 content to write.' }
+        },
+        required: ['path', 'content'],
+        additionalProperties: false
+      },
+      execute: async (input: { path: string; content: string }, options?: { toolCallId?: string }) => {
+        try {
+          const authorizedDirectory = await getOrRequestAuthorizedDirectory(sender, streamId)
+          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, input.path)
+          await mkdir(dirname(filePath), { recursive: true })
+          await writeFile(filePath, input.content, 'utf8')
+          return {
+            path: relative(authorizedDirectory, filePath),
+            bytesWritten: Buffer.byteLength(input.content, 'utf8')
+          }
+        } catch (error) {
+          console.error('[tool:write_file] failed', {
+            streamId,
+            callId: options?.toolCallId ?? 'unknown_call',
+            path: input.path,
+            message: getErrorMessage(error)
+          })
+          throw error
+        }
+      }
+    })
+  }
+}
+
+async function streamModelResponse(
+  sender: Electron.WebContents,
+  streamId: string,
+  message: string,
+  onDelta: (text: string) => void,
+  onToolStart: (toolName: string, callId: string) => void,
+  onToolResult: (toolName: string, callId: string, ok: boolean, output?: unknown, error?: string) => void
+): Promise<void> {
   const apiKey = process.env['OPENAI_API_KEY']
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not set')
   }
 
-  const baseUrl = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
+  const baseURL = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
   const model = process.env['OPENAI_MODEL'] ?? 'gpt-4.1-mini'
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [{ role: 'user', content: message }]
-    })
+  const openai = createOpenAI({
+    apiKey,
+    baseURL
   })
 
-  if (!response.ok || !response.body) {
-    const details = await response.text().catch(() => '')
-    throw new Error(`Model request failed (${response.status}): ${details}`)
-  }
+  const result = streamText({
+    model: openai(model),
+    system: MODEL_SYSTEM_PROMPT,
+    prompt: message,
+    tools: createFileTools(sender, streamId),
+    stopWhen: stepCountIs(FILE_TOOL_MAX_STEPS)
+  })
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
-    }
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim()
-      if (!line.startsWith('data:')) {
-        continue
-      }
-
-      const rawData = line.slice(5).trim()
-      if (rawData === '[DONE]') {
-        return
-      }
-
-      try {
-        const payload = JSON.parse(rawData)
-        const text = payload?.choices?.[0]?.delta?.content
-        if (typeof text === 'string' && text.length > 0) {
+  for await (const part of result.fullStream) {
+    switch (part.type) {
+      case 'text-delta': {
+        const text = typeof part.text === 'string' ? part.text : ''
+        if (text.length > 0) {
           onDelta(text)
         }
-      } catch {
-        // Ignore malformed chunks and continue streaming.
+        break
       }
+      case 'tool-call': {
+        const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
+        const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
+        console.info('[tool:start]', { streamId, toolName, callId })
+        onToolStart(toolName, callId)
+        break
+      }
+      case 'tool-result': {
+        const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
+        const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
+        console.info('[tool:result]', { streamId, toolName, callId, ok: true })
+        onToolResult(toolName, callId, true, part.output)
+        break
+      }
+      case 'tool-error': {
+        const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
+        const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
+        const message = getErrorMessage(part.error)
+        console.warn('[tool:result]', { streamId, toolName, callId, ok: false, message })
+        onToolResult(toolName, callId, false, undefined, message)
+        break
+      }
+      case 'tool-output-denied': {
+        const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
+        const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
+        const message = 'Tool output denied'
+        console.warn('[tool:result]', { streamId, toolName, callId, ok: false, message })
+        onToolResult(toolName, callId, false, undefined, message)
+        break
+      }
+      case 'abort': {
+        const reasonValue = (part as unknown as { reason?: unknown }).reason
+        const reason = typeof reasonValue === 'string' ? reasonValue : 'Model stream aborted'
+        throw new Error(reason)
+        break
+      }
+      case 'error': {
+        throw new Error(getErrorMessage(part.error))
+      }
+      default:
+        break
     }
   }
 }
@@ -156,9 +317,28 @@ app.whenReady().then(() => {
     void (async () => {
       try {
         sendChatStream(event.sender, { streamId, type: 'start' })
-        await streamModelDelta(request.message, (text) => {
-          sendChatStream(event.sender, { streamId, type: 'delta', text })
-        })
+        await streamModelResponse(
+          event.sender,
+          streamId,
+          request.message,
+          (text) => {
+            sendChatStream(event.sender, { streamId, type: 'delta', text })
+          },
+          (toolName, callId) => {
+            sendChatStream(event.sender, { streamId, type: 'tool_call_start', toolName, callId })
+          },
+          (toolName, callId, ok, output, error) => {
+            sendChatStream(event.sender, {
+              streamId,
+              type: 'tool_call_result',
+              toolName,
+              callId,
+              ok,
+              output,
+              error
+            })
+          }
+        )
         sendChatStream(event.sender, { streamId, type: 'done' })
         console.info('[chat:done] stream completed', { streamId })
       } catch (error) {
