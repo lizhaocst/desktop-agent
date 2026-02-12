@@ -198,7 +198,10 @@ function resolvePathWithinAuthorizedDirectory(authorizedDirectory: string, input
   return resolvedPath
 }
 
-function createFileTools(sender: Electron.WebContents, streamId: string) {
+function createFileTools(
+  sender: Electron.WebContents,
+  streamId: string
+): Record<string, ReturnType<typeof tool>> {
   return {
     [FILE_TOOL_READ_NAME]: tool({
       description: 'Read UTF-8 text from a file inside the authorized directory',
