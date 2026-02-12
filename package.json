@@ -24,8 +24,10 @@
     "build:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.27",
     "@electron-toolkit/preload": "^3.0.2",
-    "@electron-toolkit/utils": "^4.0.0"
+    "@electron-toolkit/utils": "^4.0.0",
+    "ai": "^6.0.81"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
