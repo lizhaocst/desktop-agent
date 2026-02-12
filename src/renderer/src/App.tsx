@@ -438,6 +438,7 @@ function App(): React.JSX.Element {
   )
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export { initialState, reducer }
 
 export default App
