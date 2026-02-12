@@ -64,4 +64,17 @@ describe('chat stream state reducer', () => {
     expect(toolCall?.errorText).toBe('permission denied')
     expect(state.toolErrorText).toBe('permission denied')
   })
+
+  it('ignores late ack after stream already done', () => {
+    const streamId = 'stream-4'
+    let state = reducer(initialState, { type: 'user:submit', text: 'hello' })
+    state = reducer(state, { type: 'start:request' })
+    state = reducer(state, { type: 'stream:event', event: { streamId, type: 'done' } })
+    state = reducer(state, { type: 'start:ack', streamId })
+
+    const hasInFlight =
+      state.isStarting || state.pendingStreamId !== null || state.activeStreamId !== null
+    expect(state.streamStatus).toBe('done')
+    expect(hasInFlight).toBe(false)
+  })
 })

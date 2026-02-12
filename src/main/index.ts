@@ -1,10 +1,12 @@
 import { app, shell, BrowserWindow, dialog, ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createOpenAI } from '@ai-sdk/openai'
 import { stepCountIs, streamText, tool } from 'ai'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { z } from 'zod'
 import icon from '../../resources/icon.png?asset'
 
 type ChatStartRequest = {
@@ -34,6 +36,7 @@ type ChatStreamEvent =
 
 const CHAT_START_CHANNEL = 'chat:start'
 const CHAT_STREAM_CHANNEL = 'chat:stream'
+const LOCAL_ENV_FILE = '.env.local'
 const FILE_TOOL_READ_NAME = 'read_file'
 const FILE_TOOL_WRITE_NAME = 'write_file'
 const FILE_TOOL_MAX_STEPS = 5
@@ -53,6 +56,86 @@ function getErrorMessage(error: unknown): string {
 
   return 'Unexpected error'
 }
+
+function parseEnvLine(line: string): [string, string] | null {
+  const trimmedLine = line.trim()
+  if (!trimmedLine || trimmedLine.startsWith('#')) {
+    return null
+  }
+
+  const normalizedLine = trimmedLine.startsWith('export ') ? trimmedLine.slice(7).trim() : trimmedLine
+  const separatorIndex = normalizedLine.indexOf('=')
+  if (separatorIndex <= 0) {
+    return null
+  }
+
+  const key = normalizedLine.slice(0, separatorIndex).trim()
+  if (!key) {
+    return null
+  }
+
+  let value = normalizedLine.slice(separatorIndex + 1).trim()
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1)
+  }
+
+  return [key, value]
+}
+
+function resolveLocalEnvPathCandidates(): string[] {
+  const candidates = new Set<string>()
+  candidates.add(resolve(process.cwd(), LOCAL_ENV_FILE))
+  candidates.add(resolve(__dirname, '../../', LOCAL_ENV_FILE))
+  candidates.add(resolve(__dirname, '../../../', LOCAL_ENV_FILE))
+
+  try {
+    candidates.add(resolve(app.getAppPath(), LOCAL_ENV_FILE))
+  } catch {
+    // ignore app path resolution failures during early startup
+  }
+
+  return [...candidates]
+}
+
+function loadLocalEnvForDev(): void {
+  if (!is.dev) {
+    return
+  }
+
+  const envPath = resolveLocalEnvPathCandidates().find((candidatePath) => existsSync(candidatePath))
+  if (!envPath) {
+    console.info('[env] .env.local not found, skip loading', {
+      candidates: resolveLocalEnvPathCandidates()
+    })
+    return
+  }
+
+  try {
+    const content = readFileSync(envPath, 'utf8')
+    const lines = content.split(/\r?\n/)
+
+    for (const line of lines) {
+      const parsedEntry = parseEnvLine(line)
+      if (!parsedEntry) {
+        continue
+      }
+
+      const [key, value] = parsedEntry
+      if (process.env[key] === undefined) {
+        process.env[key] = value
+      }
+    }
+
+    console.info('[env] .env.local loaded', { path: envPath })
+  } catch (error) {
+    console.warn('[env] failed to load .env.local', { path: envPath, message: getErrorMessage(error) })
+  }
+}
+
+loadLocalEnvForDev()
 
 function sendChatStream(webContents: Electron.WebContents, payload: ChatStreamEvent): void {
   if (webContents.isDestroyed()) {
@@ -115,22 +198,20 @@ function resolvePathWithinAuthorizedDirectory(authorizedDirectory: string, input
   return resolvedPath
 }
 
-function createFileTools(sender: Electron.WebContents, streamId: string): Record<string, unknown> {
+function createFileTools(
+  sender: Electron.WebContents,
+  streamId: string
+): Record<string, ReturnType<typeof tool>> {
   return {
     [FILE_TOOL_READ_NAME]: tool({
       description: 'Read UTF-8 text from a file inside the authorized directory',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path, relative to authorized directory.' }
-        },
-        required: ['path'],
-        additionalProperties: false
-      },
-      execute: async (input: { path: string }, options?: { toolCallId?: string }) => {
+      inputSchema: z.object({
+        path: z.string().describe('File path. Can be relative to the authorized directory.')
+      }),
+      execute: async ({ path }, { toolCallId }) => {
         try {
           const authorizedDirectory = await getOrRequestAuthorizedDirectory(sender, streamId)
-          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, input.path)
+          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, path)
           const content = await readFile(filePath, 'utf8')
           return {
             path: relative(authorizedDirectory, filePath),
@@ -139,8 +220,8 @@ function createFileTools(sender: Electron.WebContents, streamId: string): Record
         } catch (error) {
           console.error('[tool:read_file] failed', {
             streamId,
-            callId: options?.toolCallId ?? 'unknown_call',
-            path: input.path,
+            callId: toolCallId,
+            path,
             message: getErrorMessage(error)
           })
           throw error
@@ -149,30 +230,26 @@ function createFileTools(sender: Electron.WebContents, streamId: string): Record
     }),
     [FILE_TOOL_WRITE_NAME]: tool({
       description: 'Write UTF-8 text to a file inside the authorized directory',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Target file path, relative to authorized directory.' },
-          content: { type: 'string', description: 'UTF-8 content to write.' }
-        },
-        required: ['path', 'content'],
-        additionalProperties: false
-      },
-      execute: async (input: { path: string; content: string }, options?: { toolCallId?: string }) => {
+      inputSchema: z.object({
+        path: z.string().describe('Target file path. Can be relative to the authorized directory.'),
+        content: z.string().describe('UTF-8 text content to write.')
+      }),
+      execute: async ({ path, content }, { toolCallId }) => {
         try {
           const authorizedDirectory = await getOrRequestAuthorizedDirectory(sender, streamId)
-          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, input.path)
+          const filePath = resolvePathWithinAuthorizedDirectory(authorizedDirectory, path)
           await mkdir(dirname(filePath), { recursive: true })
-          await writeFile(filePath, input.content, 'utf8')
+          await writeFile(filePath, content, 'utf8')
+
           return {
             path: relative(authorizedDirectory, filePath),
-            bytesWritten: Buffer.byteLength(input.content, 'utf8')
+            bytesWritten: Buffer.byteLength(content, 'utf8')
           }
         } catch (error) {
           console.error('[tool:write_file] failed', {
             streamId,
-            callId: options?.toolCallId ?? 'unknown_call',
-            path: input.path,
+            callId: toolCallId,
+            path,
             message: getErrorMessage(error)
           })
           throw error
@@ -197,13 +274,17 @@ async function streamModelResponse(
 
   const baseURL = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
   const model = process.env['OPENAI_MODEL'] ?? 'gpt-4.1-mini'
+  const apiStyle = (process.env['OPENAI_API_STYLE'] ?? '').trim().toLowerCase()
+  const useResponsesApi =
+    apiStyle === 'responses' ||
+    (apiStyle !== 'chat' && baseURL.toLowerCase().includes('api.openai.com'))
   const openai = createOpenAI({
     apiKey,
     baseURL
   })
 
   const result = streamText({
-    model: openai(model),
+    model: useResponsesApi ? openai(model) : openai.chat(model),
     system: MODEL_SYSTEM_PROMPT,
     prompt: message,
     tools: createFileTools(sender, streamId),
@@ -237,23 +318,31 @@ async function streamModelResponse(
         const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
         const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
         const message = getErrorMessage(part.error)
-        console.warn('[tool:result]', { streamId, toolName, callId, ok: false, message })
+        console.warn('[tool:result]', {
+          streamId,
+          toolName,
+          callId,
+          ok: false,
+          message
+        })
         onToolResult(toolName, callId, false, undefined, message)
         break
       }
       case 'tool-output-denied': {
         const toolName = typeof part.toolName === 'string' ? part.toolName : 'unknown_tool'
         const callId = typeof part.toolCallId === 'string' ? part.toolCallId : 'unknown_call'
-        const message = 'Tool output denied'
-        console.warn('[tool:result]', { streamId, toolName, callId, ok: false, message })
-        onToolResult(toolName, callId, false, undefined, message)
+        console.warn('[tool:result]', {
+          streamId,
+          toolName,
+          callId,
+          ok: false,
+          message: 'Tool output denied'
+        })
+        onToolResult(toolName, callId, false, undefined, 'Tool output denied')
         break
       }
       case 'abort': {
-        const reasonValue = (part as unknown as { reason?: unknown }).reason
-        const reason = typeof reasonValue === 'string' ? reasonValue : 'Model stream aborted'
-        throw new Error(reason)
-        break
+        throw new Error(part.reason ?? 'Model stream aborted')
       }
       case 'error': {
         throw new Error(getErrorMessage(part.error))
