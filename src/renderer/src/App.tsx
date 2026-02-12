@@ -412,4 +412,6 @@ function App(): React.JSX.Element {
   )
 }
 
+export { initialState, reducer }
+
 export default App
