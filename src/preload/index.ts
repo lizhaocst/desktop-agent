@@ -14,6 +14,16 @@ type ChatStreamEvent =
   | { streamId: string; type: 'start' }
   | { streamId: string; type: 'delta'; text: string }
   | { streamId: string; type: 'done' }
+  | { streamId: string; type: 'tool_call_start'; toolName: string; callId: string }
+  | {
+      streamId: string
+      type: 'tool_call_result'
+      toolName: string
+      callId: string
+      ok: boolean
+      output?: unknown
+      error?: string
+    }
   | { streamId: string; type: 'error'; message: string }
 
 type PreloadApi = {
