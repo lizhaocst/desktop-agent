@@ -26,6 +26,23 @@ declare global {
     type: 'done'
   }
 
+  type ChatStreamToolCallStartEvent = {
+    streamId: string
+    type: 'tool_call_start'
+    toolName: string
+    callId: string
+  }
+
+  type ChatStreamToolCallResultEvent = {
+    streamId: string
+    type: 'tool_call_result'
+    toolName: string
+    callId: string
+    ok: boolean
+    output?: unknown
+    error?: unknown
+  }
+
   type ChatStreamErrorEvent = {
     streamId: string
     type: 'error'
@@ -35,6 +52,8 @@ declare global {
   type ChatStreamEvent =
     | ChatStreamStartEvent
     | ChatStreamDeltaEvent
+    | ChatStreamToolCallStartEvent
+    | ChatStreamToolCallResultEvent
     | ChatStreamDoneEvent
     | ChatStreamErrorEvent
 

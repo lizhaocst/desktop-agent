@@ -24,6 +24,18 @@ export const isChatStreamEvent = (value: unknown): value is ChatStreamEvent => {
     return typeof value.text === 'string'
   }
 
+  if (value.type === 'tool_call_start') {
+    return typeof value.toolName === 'string' && typeof value.callId === 'string'
+  }
+
+  if (value.type === 'tool_call_result') {
+    return (
+      typeof value.toolName === 'string' &&
+      typeof value.callId === 'string' &&
+      typeof value.ok === 'boolean'
+    )
+  }
+
   if (value.type === 'error') {
     return typeof value.message === 'string'
   }
@@ -32,7 +44,7 @@ export const isChatStreamEvent = (value: unknown): value is ChatStreamEvent => {
 }
 
 export const startChatStream = async (payload: ChatStartRequest): Promise<ChatStartResponse> => {
-  const response = await window.electron.ipcRenderer.invoke('chat:start', payload)
+  const response = await window.api.chat.start(payload)
 
   if (!isChatStartResponse(response)) {
     throw new Error('Invalid chat:start response shape')
@@ -42,7 +54,7 @@ export const startChatStream = async (payload: ChatStartRequest): Promise<ChatSt
 }
 
 export const subscribeChatStream = (onEvent: (event: ChatStreamEvent) => void): (() => void) => {
-  return window.electron.ipcRenderer.on('chat:stream', (_event, payload: unknown) => {
+  return window.api.chat.onStream((payload: unknown) => {
     if (isChatStreamEvent(payload)) {
       onEvent(payload)
     }

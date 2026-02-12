@@ -1,15 +1,10 @@
-import {
-  FormEvent,
-  KeyboardEvent as ReactKeyboardEvent,
-  useEffect,
-  useReducer,
-  useState
-} from 'react'
+import { FormEvent, useEffect, useReducer, useState } from 'react'
 import { startChatStream, subscribeChatStream } from '@renderer/lib/chatIpc'
 import type { ChatStreamEvent } from '@renderer/types/chat'
 
 type ChatRole = 'user' | 'assistant'
 type StreamStatus = 'idle' | 'streaming' | 'done' | 'error'
+type ToolCallStatus = 'running' | 'done' | 'error'
 
 interface ChatMessage {
   id: string
@@ -20,15 +15,24 @@ interface ChatMessage {
   errorMessage?: string
 }
 
+interface ToolCallState {
+  streamId: string
+  callId: string
+  toolName: string
+  status: ToolCallStatus
+  errorText?: string
+}
+
 interface ChatState {
   messages: ChatMessage[]
+  toolCalls: ToolCallState[]
   activeStreamId: string | null
   pendingStreamId: string | null
   isStarting: boolean
   streamStatus: StreamStatus
   errorText: string | null
+  toolErrorText: string | null
   lastUserMessage: string | null
-  streamUpdatedAt: number | null
 }
 
 type ChatAction =
@@ -37,33 +41,39 @@ type ChatAction =
   | { type: 'start:ack'; streamId: string }
   | { type: 'start:reject'; message: string }
   | { type: 'stream:event'; event: ChatStreamEvent }
-  | { type: 'stream:timeout'; streamId: string | null; message: string }
-
-const EMPTY_DONE_TEXT = '模型未返回文本'
-const STREAM_TIMEOUT_TEXT = 'Stream timed out. Please retry.'
 
 const initialState: ChatState = {
   messages: [],
+  toolCalls: [],
   activeStreamId: null,
   pendingStreamId: null,
   isStarting: false,
   streamStatus: 'idle',
   errorText: null,
-  lastUserMessage: null,
-  streamUpdatedAt: null
+  toolErrorText: null,
+  lastUserMessage: null
 }
 
-const isKnownStreamEvent = (state: ChatState, streamId: string): boolean => {
-  if (state.pendingStreamId === null && state.activeStreamId === null) {
-    return true
-  }
+const appendDeltaToStream = (
+  messages: ChatMessage[],
+  streamId: string,
+  text: string
+): ChatMessage[] =>
+  messages.map((message) => {
+    if (message.streamId !== streamId) {
+      return message
+    }
 
-  return state.pendingStreamId === streamId || state.activeStreamId === streamId
-}
+    return {
+      ...message,
+      text: `${message.text}${text}`
+    }
+  })
 
-const ensureStreamingMessage = (messages: ChatMessage[], streamId: string): ChatMessage[] => {
-  const existingIndex = messages.findIndex((message) => message.streamId === streamId)
-  if (existingIndex < 0) {
+const upsertStreamMessage = (messages: ChatMessage[], streamId: string): ChatMessage[] => {
+  const existing = messages.some((message) => message.streamId === streamId)
+
+  if (!existing) {
     return [
       ...messages,
       {
@@ -76,8 +86,8 @@ const ensureStreamingMessage = (messages: ChatMessage[], streamId: string): Chat
     ]
   }
 
-  return messages.map((message, index) => {
-    if (index !== existingIndex) {
+  return messages.map((message) => {
+    if (message.streamId !== streamId) {
       return message
     }
 
@@ -88,100 +98,106 @@ const ensureStreamingMessage = (messages: ChatMessage[], streamId: string): Chat
   })
 }
 
-const appendDeltaToStream = (
+const markStreamMessage = (
   messages: ChatMessage[],
   streamId: string,
-  text: string
-): ChatMessage[] => {
-  const existingIndex = messages.findIndex((message) => message.streamId === streamId)
-  if (existingIndex < 0) {
-    return [
-      ...messages,
-      {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        streamId,
-        text,
-        status: 'streaming'
-      }
-    ]
-  }
-
-  return messages.map((message, index) => {
-    if (index !== existingIndex) {
+  status: Exclude<StreamStatus, 'idle'>,
+  errorMessage?: string
+): ChatMessage[] =>
+  messages.map((message) => {
+    if (message.streamId !== streamId) {
       return message
     }
 
     return {
       ...message,
-      status: 'streaming',
-      text: `${message.text}${text}`
+      status,
+      errorMessage: errorMessage ?? message.errorMessage,
+      text:
+        status === 'error' && message.text.length === 0
+          ? (errorMessage ?? 'Request failed')
+          : message.text
+    }
+  })
+
+const upsertToolCallStart = (
+  toolCalls: ToolCallState[],
+  event: Extract<ChatStreamEvent, { type: 'tool_call_start' }>
+): ToolCallState[] => {
+  const existingIndex = toolCalls.findIndex(
+    (toolCall) => toolCall.streamId === event.streamId && toolCall.callId === event.callId
+  )
+
+  if (existingIndex < 0) {
+    return [
+      ...toolCalls,
+      {
+        streamId: event.streamId,
+        callId: event.callId,
+        toolName: event.toolName,
+        status: 'running'
+      }
+    ]
+  }
+
+  return toolCalls.map((toolCall, index) => {
+    if (index !== existingIndex) {
+      return toolCall
+    }
+
+    return {
+      ...toolCall,
+      toolName: event.toolName,
+      status: 'running'
     }
   })
 }
 
-const markDoneForStream = (messages: ChatMessage[], streamId: string): ChatMessage[] => {
-  const existingIndex = messages.findIndex((message) => message.streamId === streamId)
+const upsertToolCallResult = (
+  toolCalls: ToolCallState[],
+  event: Extract<ChatStreamEvent, { type: 'tool_call_result' }>
+): ToolCallState[] => {
+  const nextStatus: ToolCallStatus = event.ok ? 'done' : 'error'
+  const nextErrorText = event.ok ? undefined : getToolResultErrorText(event)
+  const existingIndex = toolCalls.findIndex(
+    (toolCall) => toolCall.streamId === event.streamId && toolCall.callId === event.callId
+  )
+
   if (existingIndex < 0) {
     return [
-      ...messages,
+      ...toolCalls,
       {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        streamId,
-        text: EMPTY_DONE_TEXT,
-        status: 'done'
+        streamId: event.streamId,
+        callId: event.callId,
+        toolName: event.toolName,
+        status: nextStatus,
+        errorText: nextErrorText
       }
     ]
   }
 
-  return messages.map((message, index) => {
+  return toolCalls.map((toolCall, index) => {
     if (index !== existingIndex) {
-      return message
+      return toolCall
     }
 
-    const nextText = message.text.trim().length > 0 ? message.text : EMPTY_DONE_TEXT
-
     return {
-      ...message,
-      status: 'done',
-      text: nextText
+      ...toolCall,
+      toolName: event.toolName,
+      status: nextStatus,
+      errorText: nextErrorText
     }
   })
 }
 
-const markErrorForStream = (
-  messages: ChatMessage[],
-  streamId: string,
-  errorMessage: string
-): ChatMessage[] => {
-  const existingIndex = messages.findIndex((message) => message.streamId === streamId)
-  if (existingIndex < 0) {
-    return [
-      ...messages,
-      {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        streamId,
-        text: errorMessage,
-        status: 'error',
-        errorMessage
-      }
-    ]
+const getToolResultErrorText = (
+  event: Extract<ChatStreamEvent, { type: 'tool_call_result' }>
+): string => {
+  if (typeof event.error === 'string' && event.error.length > 0) {
+    return event.error
   }
 
-  return messages.map((message, index) => {
-    if (index !== existingIndex) {
-      return message
-    }
-
-    return {
-      ...message,
-      status: 'error',
-      errorMessage,
-      text: message.text.length > 0 ? message.text : errorMessage
-    }
-  })
+  return `Tool ${event.toolName} failed`
 }
 
 const reducer = (state: ChatState, action: ChatAction): ChatState => {
@@ -189,6 +205,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     return {
       ...state,
       errorText: null,
+      toolErrorText: null,
       lastUserMessage: action.text,
       messages: [
         ...state.messages,
@@ -206,8 +223,8 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       ...state,
       isStarting: true,
       errorText: null,
-      streamStatus: 'streaming',
-      streamUpdatedAt: Date.now()
+      toolErrorText: null,
+      streamStatus: 'streaming'
     }
   }
 
@@ -215,10 +232,9 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     return {
       ...state,
       isStarting: false,
-      pendingStreamId: state.activeStreamId === action.streamId ? null : action.streamId,
+      pendingStreamId: action.streamId,
       errorText: null,
-      streamStatus: 'streaming',
-      streamUpdatedAt: Date.now()
+      streamStatus: 'streaming'
     }
   }
 
@@ -229,8 +245,8 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       pendingStreamId: null,
       activeStreamId: null,
       errorText: action.message,
+      toolErrorText: null,
       streamStatus: 'error',
-      streamUpdatedAt: null,
       messages: [
         ...state.messages,
         {
@@ -244,109 +260,69 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     }
   }
 
-  if (action.type === 'stream:timeout') {
-    const expectedStreamId = state.activeStreamId ?? state.pendingStreamId
-    if (!state.isStarting && expectedStreamId === null) {
-      return state
-    }
-
-    if (
-      action.streamId !== null &&
-      expectedStreamId !== null &&
-      action.streamId !== expectedStreamId
-    ) {
-      return state
-    }
-
-    return {
-      ...state,
-      isStarting: false,
-      pendingStreamId: null,
-      activeStreamId: null,
-      errorText: action.message,
-      streamStatus: 'error',
-      streamUpdatedAt: null,
-      messages:
-        expectedStreamId === null
-          ? [
-              ...state.messages,
-              {
-                id: crypto.randomUUID(),
-                role: 'assistant',
-                text: action.message,
-                status: 'error',
-                errorMessage: action.message
-              }
-            ]
-          : markErrorForStream(state.messages, expectedStreamId, action.message)
-    }
-  }
-
   const { event } = action
-  if (!isKnownStreamEvent(state, event.streamId)) {
-    return state
-  }
 
   if (event.type === 'start') {
     return {
       ...state,
-      isStarting: false,
       activeStreamId: event.streamId,
-      pendingStreamId: state.pendingStreamId === event.streamId ? null : state.pendingStreamId,
+      pendingStreamId: null,
       streamStatus: 'streaming',
-      streamUpdatedAt: Date.now(),
-      messages: ensureStreamingMessage(state.messages, event.streamId)
+      messages: upsertStreamMessage(state.messages, event.streamId)
     }
   }
 
   if (event.type === 'delta') {
     return {
       ...state,
-      isStarting: false,
-      activeStreamId: event.streamId,
-      pendingStreamId: state.pendingStreamId === event.streamId ? null : state.pendingStreamId,
-      streamStatus: 'streaming',
-      streamUpdatedAt: Date.now(),
       messages: appendDeltaToStream(state.messages, event.streamId, event.text)
     }
   }
 
-  if (event.type === 'done') {
-    const nextPending = state.pendingStreamId === event.streamId ? null : state.pendingStreamId
-    const nextActive = state.activeStreamId === event.streamId ? null : state.activeStreamId
-    const hasInFlight = state.isStarting || nextPending !== null || nextActive !== null
-
+  if (event.type === 'tool_call_start') {
     return {
       ...state,
-      isStarting: false,
-      pendingStreamId: nextPending,
-      activeStreamId: nextActive,
-      errorText: hasInFlight ? state.errorText : null,
-      streamStatus: hasInFlight ? 'streaming' : 'done',
-      streamUpdatedAt: hasInFlight ? Date.now() : null,
-      messages: markDoneForStream(state.messages, event.streamId)
+      toolCalls: upsertToolCallStart(state.toolCalls, event)
     }
   }
 
-  const nextPending = state.pendingStreamId === event.streamId ? null : state.pendingStreamId
-  const nextActive = state.activeStreamId === event.streamId ? null : state.activeStreamId
-  const hasInFlight = state.isStarting || nextPending !== null || nextActive !== null
+  if (event.type === 'tool_call_result') {
+    const nextToolErrorText = event.ok ? state.toolErrorText : getToolResultErrorText(event)
+
+    return {
+      ...state,
+      toolErrorText: nextToolErrorText,
+      toolCalls: upsertToolCallResult(state.toolCalls, event)
+    }
+  }
+
+  if (event.type === 'done') {
+    return {
+      ...state,
+      isStarting: false,
+      pendingStreamId: null,
+      activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
+      errorText: null,
+      toolErrorText: state.toolErrorText,
+      streamStatus: 'done',
+      messages: markStreamMessage(state.messages, event.streamId, 'done')
+    }
+  }
 
   return {
     ...state,
     isStarting: false,
-    pendingStreamId: nextPending,
-    activeStreamId: nextActive,
+    pendingStreamId: null,
+    activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
     errorText: event.message,
-    streamStatus: hasInFlight ? 'streaming' : 'error',
-    streamUpdatedAt: hasInFlight ? Date.now() : null,
-    messages: markErrorForStream(state.messages, event.streamId, event.message)
+    toolErrorText: null,
+    streamStatus: 'error',
+    messages: markStreamMessage(state.messages, event.streamId, 'error', event.message)
   }
 }
 
 function App(): React.JSX.Element {
   const [inputText, setInputText] = useState('')
-  const [isComposing, setIsComposing] = useState(false)
   const [state, dispatch] = useReducer(reducer, initialState)
 
   useEffect(() => {
@@ -355,32 +331,16 @@ function App(): React.JSX.Element {
     })
   }, [])
 
-  const inFlightStreamId = state.activeStreamId ?? state.pendingStreamId
+  const isBusy =
+    state.isStarting ||
+    state.pendingStreamId !== null ||
+    state.activeStreamId !== null ||
+    state.streamStatus === 'streaming'
+  const visibleErrorText = state.errorText ?? state.toolErrorText
+  const canSend = inputText.trim().length > 0 && !isBusy
 
-  useEffect(() => {
-    if (!state.isStarting && inFlightStreamId === null) {
-      return
-    }
-
-    const timeoutMs = 20000
-    const baseTime = state.streamUpdatedAt ?? Date.now()
-    const delay = Math.max(0, timeoutMs - (Date.now() - baseTime))
-    const timerId = window.setTimeout(() => {
-      dispatch({ type: 'stream:timeout', streamId: inFlightStreamId, message: STREAM_TIMEOUT_TEXT })
-    }, delay)
-
-    return () => {
-      window.clearTimeout(timerId)
-    }
-  }, [state.isStarting, inFlightStreamId, state.streamUpdatedAt])
-
-  const hasInFlight =
-    state.isStarting || state.pendingStreamId !== null || state.activeStreamId !== null
-  const canSend = inputText.trim().length > 0 && !hasInFlight && !isComposing
-
-  const sendMessage = async (rawMessage: string): Promise<void> => {
-    const message = rawMessage.trim()
-    if (!message || hasInFlight || isComposing) {
+  const sendMessage = async (message: string): Promise<void> => {
+    if (!message || isBusy) {
       return
     }
 
@@ -403,29 +363,15 @@ function App(): React.JSX.Element {
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
-    await sendMessage(inputText)
+    await sendMessage(inputText.trim())
   }
 
   const onRetry = async (): Promise<void> => {
-    if (!state.lastUserMessage || hasInFlight) {
+    if (!state.lastUserMessage || isBusy) {
       return
     }
 
     await sendMessage(state.lastUserMessage)
-  }
-
-  const onInputKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key !== 'Enter' || event.shiftKey) {
-      return
-    }
-
-    const nativeEvent = event.nativeEvent
-    if (isComposing || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
-      return
-    }
-
-    event.preventDefault()
-    void sendMessage(inputText)
   }
 
   return (
@@ -434,12 +380,29 @@ function App(): React.JSX.Element {
         <span>R-P1-Loop Chat</span>
         <span className={`stream-status status-${state.streamStatus}`}>{state.streamStatus}</span>
       </header>
-      {state.errorText && (
+      {visibleErrorText && (
         <section className="error-banner" role="alert">
-          <span>{state.errorText}</span>
-          <button type="button" className="retry-button" onClick={onRetry} disabled={hasInFlight}>
+          <span>{visibleErrorText}</span>
+          <button type="button" className="retry-button" onClick={onRetry} disabled={isBusy}>
             Retry last message
           </button>
+        </section>
+      )}
+      {state.toolCalls.length > 0 && (
+        <section className="tool-call-panel" aria-live="polite">
+          <p className="tool-call-title">Tool Calls</p>
+          <div className="tool-call-list">
+            {state.toolCalls.map((toolCall) => (
+              <article key={`${toolCall.streamId}:${toolCall.callId}`} className="tool-call-item">
+                <span className="tool-call-name">{toolCall.toolName}</span>
+                <span className={`tool-call-status tool-status-${toolCall.status}`}>
+                  {toolCall.status}
+                </span>
+                <span className="tool-call-id">{toolCall.callId}</span>
+                {toolCall.errorText && <span className="tool-call-error">{toolCall.errorText}</span>}
+              </article>
+            ))}
+          </div>
         </section>
       )}
       <section className="message-list" aria-live="polite">
@@ -461,21 +424,21 @@ function App(): React.JSX.Element {
         <textarea
           value={inputText}
           onChange={(event) => setInputText(event.target.value)}
-          onCompositionStart={() => setIsComposing(true)}
-          onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={onInputKeyDown}
           rows={3}
           placeholder="Type your message"
-          disabled={hasInFlight}
+          disabled={isBusy}
         />
         <div className="actions">
           <button type="submit" disabled={!canSend}>
-            {hasInFlight ? 'Working...' : 'Send'}
+            {isBusy ? 'Working...' : 'Send'}
           </button>
         </div>
       </form>
     </main>
   )
 }
+
+// eslint-disable-next-line react-refresh/only-export-components
+export { initialState, reducer }
 
 export default App
