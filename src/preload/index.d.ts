@@ -40,7 +40,7 @@ declare global {
     callId: string
     ok: boolean
     output?: unknown
-    error?: string
+    error?: unknown
   }
 
   type ChatStreamErrorEvent = {
@@ -52,9 +52,9 @@ declare global {
   type ChatStreamEvent =
     | ChatStreamStartEvent
     | ChatStreamDeltaEvent
-    | ChatStreamDoneEvent
     | ChatStreamToolCallStartEvent
     | ChatStreamToolCallResultEvent
+    | ChatStreamDoneEvent
     | ChatStreamErrorEvent
 
   interface ChatApi {
