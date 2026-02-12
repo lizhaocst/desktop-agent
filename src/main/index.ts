@@ -1,6 +1,8 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { join } from 'path'
+import { createOpenAI } from '@ai-sdk/openai'
+import { streamText } from 'ai'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
@@ -45,60 +47,21 @@ async function streamModelDelta(message: string, onDelta: (text: string) => void
     throw new Error('OPENAI_API_KEY is not set')
   }
 
-  const baseUrl = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
+  const baseURL = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
   const model = process.env['OPENAI_MODEL'] ?? 'gpt-4.1-mini'
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [{ role: 'user', content: message }]
-    })
+  const openai = createOpenAI({
+    apiKey,
+    baseURL
   })
 
-  if (!response.ok || !response.body) {
-    const details = await response.text().catch(() => '')
-    throw new Error(`Model request failed (${response.status}): ${details}`)
-  }
+  const result = streamText({
+    model: openai(model),
+    prompt: message
+  })
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
-    }
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim()
-      if (!line.startsWith('data:')) {
-        continue
-      }
-
-      const rawData = line.slice(5).trim()
-      if (rawData === '[DONE]') {
-        return
-      }
-
-      try {
-        const payload = JSON.parse(rawData)
-        const text = payload?.choices?.[0]?.delta?.content
-        if (typeof text === 'string' && text.length > 0) {
-          onDelta(text)
-        }
-      } catch {
-        // Ignore malformed chunks and continue streaming.
-      }
+  for await (const text of result.textStream) {
+    if (text.length > 0) {
+      onDelta(text)
     }
   }
 }
