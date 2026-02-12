@@ -271,13 +271,17 @@ async function streamModelResponse(
 
   const baseURL = process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1'
   const model = process.env['OPENAI_MODEL'] ?? 'gpt-4.1-mini'
+  const apiStyle = (process.env['OPENAI_API_STYLE'] ?? '').trim().toLowerCase()
+  const useResponsesApi =
+    apiStyle === 'responses' ||
+    (apiStyle !== 'chat' && baseURL.toLowerCase().includes('api.openai.com'))
   const openai = createOpenAI({
     apiKey,
     baseURL
   })
 
   const result = streamText({
-    model: openai(model),
+    model: useResponsesApi ? openai(model) : openai.chat(model),
     system: MODEL_SYSTEM_PROMPT,
     prompt: message,
     tools: createFileTools(sender, streamId),
