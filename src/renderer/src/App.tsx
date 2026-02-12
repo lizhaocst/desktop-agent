@@ -20,6 +20,7 @@ interface ToolCallState {
   callId: string
   toolName: string
   status: ToolCallStatus
+  errorText?: string
 }
 
 interface ChatState {
@@ -30,6 +31,7 @@ interface ChatState {
   isStarting: boolean
   streamStatus: StreamStatus
   errorText: string | null
+  toolErrorText: string | null
   lastUserMessage: string | null
 }
 
@@ -48,6 +50,7 @@ const initialState: ChatState = {
   isStarting: false,
   streamStatus: 'idle',
   errorText: null,
+  toolErrorText: null,
   lastUserMessage: null
 }
 
@@ -155,6 +158,7 @@ const upsertToolCallResult = (
   event: Extract<ChatStreamEvent, { type: 'tool_call_result' }>
 ): ToolCallState[] => {
   const nextStatus: ToolCallStatus = event.ok ? 'done' : 'error'
+  const nextErrorText = event.ok ? undefined : getToolResultErrorText(event)
   const existingIndex = toolCalls.findIndex(
     (toolCall) => toolCall.streamId === event.streamId && toolCall.callId === event.callId
   )
@@ -166,7 +170,8 @@ const upsertToolCallResult = (
         streamId: event.streamId,
         callId: event.callId,
         toolName: event.toolName,
-        status: nextStatus
+        status: nextStatus,
+        errorText: nextErrorText
       }
     ]
   }
@@ -179,9 +184,20 @@ const upsertToolCallResult = (
     return {
       ...toolCall,
       toolName: event.toolName,
-      status: nextStatus
+      status: nextStatus,
+      errorText: nextErrorText
     }
   })
+}
+
+const getToolResultErrorText = (
+  event: Extract<ChatStreamEvent, { type: 'tool_call_result' }>
+): string => {
+  if (typeof event.error === 'string' && event.error.length > 0) {
+    return event.error
+  }
+
+  return `Tool ${event.toolName} failed`
 }
 
 const reducer = (state: ChatState, action: ChatAction): ChatState => {
@@ -189,6 +205,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     return {
       ...state,
       errorText: null,
+      toolErrorText: null,
       lastUserMessage: action.text,
       messages: [
         ...state.messages,
@@ -206,6 +223,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       ...state,
       isStarting: true,
       errorText: null,
+      toolErrorText: null,
       streamStatus: 'streaming'
     }
   }
@@ -227,6 +245,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       pendingStreamId: null,
       activeStreamId: null,
       errorText: action.message,
+      toolErrorText: null,
       streamStatus: 'error',
       messages: [
         ...state.messages,
@@ -268,8 +287,11 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
   }
 
   if (event.type === 'tool_call_result') {
+    const nextToolErrorText = event.ok ? state.toolErrorText : getToolResultErrorText(event)
+
     return {
       ...state,
+      toolErrorText: nextToolErrorText,
       toolCalls: upsertToolCallResult(state.toolCalls, event)
     }
   }
@@ -281,6 +303,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
       pendingStreamId: null,
       activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
       errorText: null,
+      toolErrorText: state.toolErrorText,
       streamStatus: 'done',
       messages: markStreamMessage(state.messages, event.streamId, 'done')
     }
@@ -292,6 +315,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     pendingStreamId: null,
     activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
     errorText: event.message,
+    toolErrorText: null,
     streamStatus: 'error',
     messages: markStreamMessage(state.messages, event.streamId, 'error', event.message)
   }
@@ -312,6 +336,7 @@ function App(): React.JSX.Element {
     state.pendingStreamId !== null ||
     state.activeStreamId !== null ||
     state.streamStatus === 'streaming'
+  const visibleErrorText = state.errorText ?? state.toolErrorText
   const canSend = inputText.trim().length > 0 && !isBusy
 
   const sendMessage = async (message: string): Promise<void> => {
@@ -355,9 +380,9 @@ function App(): React.JSX.Element {
         <span>R-P1-Loop Chat</span>
         <span className={`stream-status status-${state.streamStatus}`}>{state.streamStatus}</span>
       </header>
-      {state.errorText && (
+      {visibleErrorText && (
         <section className="error-banner" role="alert">
-          <span>{state.errorText}</span>
+          <span>{visibleErrorText}</span>
           <button type="button" className="retry-button" onClick={onRetry} disabled={isBusy}>
             Retry last message
           </button>
@@ -374,6 +399,7 @@ function App(): React.JSX.Element {
                   {toolCall.status}
                 </span>
                 <span className="tool-call-id">{toolCall.callId}</span>
+                {toolCall.errorText && <span className="tool-call-error">{toolCall.errorText}</span>}
               </article>
             ))}
           </div>

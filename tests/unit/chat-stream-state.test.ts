@@ -36,4 +36,32 @@ describe('chat stream state reducer', () => {
     expect(assistantMessage?.status).toBe('error')
     expect(assistantMessage?.errorMessage).toBe(errorMessage)
   })
+
+  it('exposes tool failure for retry flow', () => {
+    const streamId = 'stream-3'
+    const callId = 'call-1'
+    let state = reducer(initialState, { type: 'user:submit', text: 'read file' })
+    state = reducer(state, { type: 'start:request' })
+    state = reducer(state, { type: 'start:ack', streamId })
+    state = reducer(state, {
+      type: 'stream:event',
+      event: { streamId, type: 'tool_call_start', toolName: 'read_file', callId }
+    })
+    state = reducer(state, {
+      type: 'stream:event',
+      event: {
+        streamId,
+        type: 'tool_call_result',
+        toolName: 'read_file',
+        callId,
+        ok: false,
+        error: 'permission denied'
+      }
+    })
+
+    const toolCall = state.toolCalls.find((item) => item.callId === callId)
+    expect(toolCall?.status).toBe('error')
+    expect(toolCall?.errorText).toBe('permission denied')
+    expect(state.toolErrorText).toBe('permission denied')
+  })
 })
