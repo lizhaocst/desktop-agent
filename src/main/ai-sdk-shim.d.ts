@@ -2,7 +2,10 @@ declare module '@ai-sdk/openai' {
   export function createOpenAI(options: {
     apiKey?: string
     baseURL?: string
-  }): (model: string) => unknown
+  }): {
+    (model: string): unknown
+    chat: (model: string) => unknown
+  }
 }
 
 declare module 'ai' {
@@ -23,6 +26,7 @@ declare module 'ai' {
       toolCallId?: string
       output?: unknown
       error?: unknown
+      reason?: string
     }>
   }
 }
