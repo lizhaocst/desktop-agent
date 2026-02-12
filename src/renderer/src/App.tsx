@@ -28,6 +28,7 @@ interface ChatState {
   toolCalls: ToolCallState[]
   activeStreamId: string | null
   pendingStreamId: string | null
+  settledStreamIds: string[]
   isStarting: boolean
   streamStatus: StreamStatus
   errorText: string | null
@@ -47,11 +48,21 @@ const initialState: ChatState = {
   toolCalls: [],
   activeStreamId: null,
   pendingStreamId: null,
+  settledStreamIds: [],
   isStarting: false,
   streamStatus: 'idle',
   errorText: null,
   toolErrorText: null,
   lastUserMessage: null
+}
+
+const MAX_SETTLED_STREAM_IDS = 20
+
+const rememberSettledStream = (settledStreamIds: string[], streamId: string): string[] => {
+  return [streamId, ...settledStreamIds.filter((id) => id !== streamId)].slice(
+    0,
+    MAX_SETTLED_STREAM_IDS
+  )
 }
 
 const appendDeltaToStream = (
@@ -229,10 +240,14 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
   }
 
   if (action.type === 'start:ack') {
+    if (state.settledStreamIds.includes(action.streamId)) {
+      return state
+    }
+
     return {
       ...state,
       isStarting: false,
-      pendingStreamId: action.streamId,
+      pendingStreamId: state.activeStreamId === action.streamId ? null : action.streamId,
       errorText: null,
       streamStatus: 'streaming'
     }
@@ -265,6 +280,7 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
   if (event.type === 'start') {
     return {
       ...state,
+      isStarting: false,
       activeStreamId: event.streamId,
       pendingStreamId: null,
       streamStatus: 'streaming',
@@ -297,26 +313,36 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
   }
 
   if (event.type === 'done') {
+    const nextPending =
+      state.pendingStreamId === event.streamId ? null : state.pendingStreamId
+    const nextActive = state.activeStreamId === event.streamId ? null : state.activeStreamId
+    const hasInFlight = nextPending !== null || nextActive !== null
+
     return {
       ...state,
       isStarting: false,
-      pendingStreamId: null,
-      activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
-      errorText: null,
-      toolErrorText: state.toolErrorText,
-      streamStatus: 'done',
+      pendingStreamId: nextPending,
+      activeStreamId: nextActive,
+      settledStreamIds: rememberSettledStream(state.settledStreamIds, event.streamId),
+      errorText: hasInFlight ? state.errorText : null,
+      streamStatus: hasInFlight ? 'streaming' : 'done',
       messages: markStreamMessage(state.messages, event.streamId, 'done')
     }
   }
 
+  const nextPending = state.pendingStreamId === event.streamId ? null : state.pendingStreamId
+  const nextActive = state.activeStreamId === event.streamId ? null : state.activeStreamId
+  const hasInFlight = nextPending !== null || nextActive !== null
+
   return {
     ...state,
     isStarting: false,
-    pendingStreamId: null,
-    activeStreamId: state.activeStreamId === event.streamId ? null : state.activeStreamId,
-    errorText: event.message,
+    pendingStreamId: nextPending,
+    activeStreamId: nextActive,
+    settledStreamIds: rememberSettledStream(state.settledStreamIds, event.streamId),
+    errorText: hasInFlight ? state.errorText : event.message,
     toolErrorText: null,
-    streamStatus: 'error',
+    streamStatus: hasInFlight ? 'streaming' : 'error',
     messages: markStreamMessage(state.messages, event.streamId, 'error', event.message)
   }
 }
