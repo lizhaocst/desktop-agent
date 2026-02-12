@@ -4,6 +4,7 @@ import type { ChatStreamEvent } from '@renderer/types/chat'
 
 type ChatRole = 'user' | 'assistant'
 type StreamStatus = 'idle' | 'streaming' | 'done' | 'error'
+type ToolCallStatus = 'running' | 'done' | 'error'
 
 interface ChatMessage {
   id: string
@@ -14,8 +15,16 @@ interface ChatMessage {
   errorMessage?: string
 }
 
+interface ToolCallState {
+  streamId: string
+  callId: string
+  toolName: string
+  status: ToolCallStatus
+}
+
 interface ChatState {
   messages: ChatMessage[]
+  toolCalls: ToolCallState[]
   activeStreamId: string | null
   pendingStreamId: string | null
   isStarting: boolean
@@ -33,6 +42,7 @@ type ChatAction =
 
 const initialState: ChatState = {
   messages: [],
+  toolCalls: [],
   activeStreamId: null,
   pendingStreamId: null,
   isStarting: false,
@@ -107,6 +117,73 @@ const markStreamMessage = (
     }
   })
 
+const upsertToolCallStart = (
+  toolCalls: ToolCallState[],
+  event: Extract<ChatStreamEvent, { type: 'tool_call_start' }>
+): ToolCallState[] => {
+  const existingIndex = toolCalls.findIndex(
+    (toolCall) => toolCall.streamId === event.streamId && toolCall.callId === event.callId
+  )
+
+  if (existingIndex < 0) {
+    return [
+      ...toolCalls,
+      {
+        streamId: event.streamId,
+        callId: event.callId,
+        toolName: event.toolName,
+        status: 'running'
+      }
+    ]
+  }
+
+  return toolCalls.map((toolCall, index) => {
+    if (index !== existingIndex) {
+      return toolCall
+    }
+
+    return {
+      ...toolCall,
+      toolName: event.toolName,
+      status: 'running'
+    }
+  })
+}
+
+const upsertToolCallResult = (
+  toolCalls: ToolCallState[],
+  event: Extract<ChatStreamEvent, { type: 'tool_call_result' }>
+): ToolCallState[] => {
+  const nextStatus: ToolCallStatus = event.ok ? 'done' : 'error'
+  const existingIndex = toolCalls.findIndex(
+    (toolCall) => toolCall.streamId === event.streamId && toolCall.callId === event.callId
+  )
+
+  if (existingIndex < 0) {
+    return [
+      ...toolCalls,
+      {
+        streamId: event.streamId,
+        callId: event.callId,
+        toolName: event.toolName,
+        status: nextStatus
+      }
+    ]
+  }
+
+  return toolCalls.map((toolCall, index) => {
+    if (index !== existingIndex) {
+      return toolCall
+    }
+
+    return {
+      ...toolCall,
+      toolName: event.toolName,
+      status: nextStatus
+    }
+  })
+}
+
 const reducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.type === 'user:submit') {
     return {
@@ -180,6 +257,20 @@ const reducer = (state: ChatState, action: ChatAction): ChatState => {
     return {
       ...state,
       messages: appendDeltaToStream(state.messages, event.streamId, event.text)
+    }
+  }
+
+  if (event.type === 'tool_call_start') {
+    return {
+      ...state,
+      toolCalls: upsertToolCallStart(state.toolCalls, event)
+    }
+  }
+
+  if (event.type === 'tool_call_result') {
+    return {
+      ...state,
+      toolCalls: upsertToolCallResult(state.toolCalls, event)
     }
   }
 
@@ -270,6 +361,22 @@ function App(): React.JSX.Element {
           <button type="button" className="retry-button" onClick={onRetry} disabled={isBusy}>
             Retry last message
           </button>
+        </section>
+      )}
+      {state.toolCalls.length > 0 && (
+        <section className="tool-call-panel" aria-live="polite">
+          <p className="tool-call-title">Tool Calls</p>
+          <div className="tool-call-list">
+            {state.toolCalls.map((toolCall) => (
+              <article key={`${toolCall.streamId}:${toolCall.callId}`} className="tool-call-item">
+                <span className="tool-call-name">{toolCall.toolName}</span>
+                <span className={`tool-call-status tool-status-${toolCall.status}`}>
+                  {toolCall.status}
+                </span>
+                <span className="tool-call-id">{toolCall.callId}</span>
+              </article>
+            ))}
+          </div>
         </section>
       )}
       <section className="message-list" aria-live="polite">

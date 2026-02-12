@@ -24,6 +24,18 @@ export const isChatStreamEvent = (value: unknown): value is ChatStreamEvent => {
     return typeof value.text === 'string'
   }
 
+  if (value.type === 'tool_call_start') {
+    return typeof value.toolName === 'string' && typeof value.callId === 'string'
+  }
+
+  if (value.type === 'tool_call_result') {
+    return (
+      typeof value.toolName === 'string' &&
+      typeof value.callId === 'string' &&
+      typeof value.ok === 'boolean'
+    )
+  }
+
   if (value.type === 'error') {
     return typeof value.message === 'string'
   }
