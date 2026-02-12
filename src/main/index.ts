@@ -85,14 +85,31 @@ function parseEnvLine(line: string): [string, string] | null {
   return [key, value]
 }
 
+function resolveLocalEnvPathCandidates(): string[] {
+  const candidates = new Set<string>()
+  candidates.add(resolve(process.cwd(), LOCAL_ENV_FILE))
+  candidates.add(resolve(__dirname, '../../', LOCAL_ENV_FILE))
+  candidates.add(resolve(__dirname, '../../../', LOCAL_ENV_FILE))
+
+  try {
+    candidates.add(resolve(app.getAppPath(), LOCAL_ENV_FILE))
+  } catch {
+    // ignore app path resolution failures during early startup
+  }
+
+  return [...candidates]
+}
+
 function loadLocalEnvForDev(): void {
   if (!is.dev) {
     return
   }
 
-  const envPath = resolve(process.cwd(), LOCAL_ENV_FILE)
-  if (!existsSync(envPath)) {
-    console.info('[env] .env.local not found, skip loading', { path: envPath })
+  const envPath = resolveLocalEnvPathCandidates().find((candidatePath) => existsSync(candidatePath))
+  if (!envPath) {
+    console.info('[env] .env.local not found, skip loading', {
+      candidates: resolveLocalEnvPathCandidates()
+    })
     return
   }
 
